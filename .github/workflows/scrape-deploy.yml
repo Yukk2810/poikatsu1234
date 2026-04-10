@@ -1,0 +1,94 @@
+name: Scrape & Deploy
+
+on:
+  schedule:
+    # 毎日 7:00 / 12:00 / 19:00 JST (UTC +9)
+    - cron: '0 22 * * *'   # JST 7:00
+    - cron: '0 3 * * *'    # JST 12:00
+    - cron: '0 10 * * *'   # JST 19:00
+  push:
+    branches: [main]
+  workflow_dispatch:       # 手動実行も可
+
+permissions:
+  contents: write          # JSONをリポジトリにコミット
+  pages: write
+  id-token: write
+
+concurrency:
+  group: scrape-deploy
+  cancel-in-progress: false
+
+jobs:
+  scrape:
+    runs-on: ubuntu-latest
+    outputs:
+      updated: ${{ steps.check.outputs.updated }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run scrapers
+        run: python run_scraper.py
+        # 一部サイト失敗でも続行（exit code 0 or 1 を許容）
+        continue-on-error: false
+
+      - name: Check if offers.json changed
+        id: check
+        run: |
+          if git diff --quiet public/offers.json 2>/dev/null; then
+            echo "updated=false" >> $GITHUB_OUTPUT
+          else
+            echo "updated=true" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Commit offers.json
+        if: steps.check.outputs.updated == 'true'
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add public/offers.json
+          git commit -m "data: update offers.json [$(date '+%Y-%m-%d %H:%M') JST]"
+          git push
+
+  build-deploy:
+    needs: scrape
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: main   # scrapeジョブのコミット後を取得
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Install
+        run: npm ci
+
+      - name: Build
+        run: npm run build
+
+      - name: Upload artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: dist
+
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
